@@ -1,35 +1,75 @@
 # eecs583project
 
-From your project root:
+This repo contains our EECS 583 term project:
 
-mkdir build
+- `profiler/` — LLVM pass plugin(s) for cache profiling / optimization.
+- `runtime/` — support library (e.g., logging runtime, if needed later).
+- `benchmarks/` — C benchmarks we run our passes on.
+
+---
+
+## Building
+
+From your **project root**:
+
+```bash
+mkdir -p build
 cd build
-cmake ..
+cmake -DLLVM_DIR=$(llvm-config --cmakedir) ..
 cmake --build . -j
-
+```
 
 You’ll get:
 
-profiler/CacheProfilerPass.{so,dylib} — your LLVM pass plugin.
+`build/profiler/CacheOptPass.so` — our LLVM pass plugin (cache-opt pass).
 
-runtime/libcp_runtime.a — your logging runtime.
+`build/runtime/libcp_runtime.a` — runtime library (for future instrumentation / logging).
 
-benchmarks/matmul, benchmarks/linked_list, etc.
+`build/benchmarks/` — source benchmarks live in ../benchmarks/*.c.
 
-Then a typical workflow:
+## Running the pass on a benchmark
 
-# Instrument a benchmark
-clang -O0 -emit-llvm -c ../benchmarks/matmul.c -o matmul.bc
+Example: run `CacheOptPass` on `bad_matrix_walk.c` to dump all load/store → (file, line) mappings.
 
-opt -load-pass-plugin=./profiler/CacheProfilerPass.dylib \
-    -passes="function(cache-profiler)" \
-    matmul.bc -o matmul.prof.bc
+### 1. Compile the benchmark to LLVM IR (unoptimized, with debug)
 
-# Compile with runtime
-clang matmul.prof.bc runtime/libcp_runtime.a -o matmul.prof
+From `build/`:
+```bash
+clang -O0 -g -emit-llvm -S \
+  ../benchmarks/bad_matrix_walk.c \
+  -o bad_matrix_walk.ll
+```
+- -O0 so LLVM doesn’t optimize away the loops/loads.
+- -g so debug info exists (we can map to source file + line).
 
-# Run with trace output
-CP_TRACE_FILE=matmul.trace ./matmul.prof
+### 2. Run the LLVM pass plugin
+
+From `build/`:
+```bash
+opt \
+  -load-pass-plugin ./profiler/CacheOptPass.so \
+  -passes="cache-opt" \
+  bad_matrix_walk.ll \
+  -disable-output > load_store_map.csv
+```
+
+This:
+- Loads our plugin CacheOptPass.so.
+- Runs the cache-opt module pass over bad_matrix_walk.ll.
+- Does not emit modified IR (-disable-output), just runs the pass.
+- Redirects everything the pass prints (e.g.,
+```
+main,load,../benchmarks/bad_matrix_walk.c,12
+main,store,../benchmarks/bad_matrix_walk.c,8
+...
+```
+)
+into `load_store_map.csv`.
 
 
-From there, your tools/convert_to_dinero.py + run_cache_sim.sh can eat matmul.trace.
+`load_store_map.csv` is effectively:
+
+`<function>,<kind>,<filename>,<line>`
+
+for every load / store that has debug info.
+

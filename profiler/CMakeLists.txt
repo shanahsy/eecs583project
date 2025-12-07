@@ -1,1 +1,1 @@
-add_llvm_pass_plugin(CacheProfilerPass CacheProfilerPass.cpp)
+add_llvm_pass_plugin(CacheOptPass CacheOptPass.cpp)

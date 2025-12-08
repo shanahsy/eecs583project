@@ -8,6 +8,8 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Type.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -18,13 +20,29 @@ static bool isMemAccess(const Instruction &I) {
 
 struct CacheOptPass : public PassInfoMixin<CacheOptPass> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
-    // outs() << "[CacheOptPass::run] visiting module: " << M.getName() << "\n";
+    LLVMContext &Ctx = M.getContext();
+
+    // Types
+    Type *VoidTy  = Type::getVoidTy(Ctx);
+    Type *Int32Ty = Type::getInt32Ty(Ctx);
+    Type *Int8Ty  = Type::getInt8Ty(Ctx);
+    // older LLVM: no Type::getInt8PtrTy, so use PointerType
+    PointerType *Int8PtrTy = PointerType::getUnqual(Int8Ty);
+
+    // void cacheopt_log(int id, void *addr, int isLoad);
+    FunctionCallee LogFn = M.getOrInsertFunction(
+        "cacheopt_log",
+        VoidTy,
+        Int32Ty,
+        Int8PtrTy,
+        Int32Ty
+    );
+
+    int NextID = 0;
 
     for (Function &F : M) {
       if (F.isDeclaration())
         continue;
-
-      // outs() << "[CacheOptPass] visiting function " << F.getName() << "\n";
 
       for (BasicBlock &BB : F) {
         for (Instruction &I : BB) {
@@ -41,15 +59,40 @@ struct CacheOptPass : public PassInfoMixin<CacheOptPass> {
 
           StringRef FileName = Loc->getFilename();
           unsigned Line      = Loc->getLine();
+          bool IsLoad        = isa<LoadInst>(&I);
 
-          outs() << F.getName() << ","
-                 << (isa<LoadInst>(&I) ? "load" : "store") << ","
-                 << FileName << "," << Line << "\n";
+          int InstID = NextID++;
+
+          // ---- static mapping: ID,Func,kind,File,Line ----
+          outs() << InstID << ","
+                 << F.getName() << ","
+                 << (IsLoad ? "load" : "store") << ","
+                 << FileName << ","
+                 << Line << "\n";
+
+          // ---- instrumentation: call cacheopt_log ----
+          Value *Ptr = nullptr;
+          if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            Ptr = LI->getPointerOperand();
+          } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+            Ptr = SI->getPointerOperand();
+          }
+
+          if (!Ptr)
+            continue;
+
+          IRBuilder<> B(&I); // insert *before* instruction
+
+          Value *PtrCast   = B.CreateBitCast(Ptr, Int8PtrTy);
+          Value *IDConst   = ConstantInt::get(Int32Ty, InstID);
+          Value *IsLoadVal = ConstantInt::get(Int32Ty, IsLoad ? 1 : 0);
+
+          B.CreateCall(LogFn, {IDConst, PtrCast, IsLoadVal});
         }
       }
     }
 
-    return PreservedAnalyses::all();
+    return PreservedAnalyses::none();
   }
 };
 
@@ -64,7 +107,6 @@ LLVM_ATTRIBUTE_WEAK llvmGetPassPluginInfo() {
         [](StringRef Name, ModulePassManager &MPM,
            ArrayRef<PassBuilder::PipelineElement>) {
           if (Name == "cache-opt") {
-            // outs() << "[CacheOptPass] registering *module* pipeline 'cache-opt'\n";
             MPM.addPass(CacheOptPass());
             return true;
           }

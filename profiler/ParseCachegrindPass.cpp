@@ -31,13 +31,22 @@ static cl::opt<std::string> CacheCGFile("cache-cg-file",
 static cl::opt<uint64_t> MissThreshold(
     "cache-miss-threshold",
     cl::desc("Total data cache misses (D1mr+DLmr+D1mw+DLmw) needed to prefetch"),
-    cl::init(1000)); // Subject to change
+    cl::init(100)); // Subject to change
 
 // Constants
 const std::string AutoAnnotatedPrefix = "-- Auto-annotated source:";
 const std::string EndAnnotatedBlock =
     "--------------------------------------------------------------------------"
     "------";
+
+static std::string normalizeFileName(const std::string &Path) {
+  std::string S = Path;
+  // Strip directory components: keep only the basename
+  auto pos = S.find_last_of("/\\");
+  if (pos != std::string::npos)
+    S = S.substr(pos + 1);
+  return S;
+}
 
 /**
 Metrics from Cachegrind for that specific line.
@@ -57,6 +66,7 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
   std::map<FileLinePair, CacheMetrics> lineMetrics;
 
   bool isHotLine(const FileLinePair &fl) {
+    // errs() << "Looking for fl: " << fl.first << "\n" << fl.second << "\n";
     auto it = lineMetrics.find(fl);
     if (it == lineMetrics.end())
       return false;
@@ -115,16 +125,16 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
     while (std::getline(ifs, line)) {
       // if line is the start of the annotated cache info (code block)
       if (line.rfind(AutoAnnotatedPrefix, 0) == 0) {
-        // get filename after colon and trim excess spaces
-        auto filename = line.substr(AutoAnnotatedPrefix.size());
-        currentFile =
-            std::regex_replace(filename, std::regex("^ +| +$|( ) +"), "$1");
-        lineNumber = 0;
-        std::getline(ifs, line); // skips first ------ block
-        // now inside a code block, reset line number and start looking at next
-        // lines
-        continue;
-      }
+      auto filename = line.substr(AutoAnnotatedPrefix.size());
+      std::string trimmed =
+          std::regex_replace(filename, std::regex("^ +| +$|( ) +"), "$1");
+
+      currentFile = normalizeFileName(trimmed);
+      lineNumber = 0;
+      std::getline(ifs, line); // skips first ------ block
+      continue;
+    }
+
 
       // if we're at the end of an annotated block
       // added line number check since beginning block after filename has the
@@ -210,6 +220,25 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
     }
     errs() << "Parsed " << lineMetrics.size()
            << " annotated lines from cachegrind\n";
+
+  //   // Remove: just for debugging
+  //   errs() << "[parseInputFile] Dumping first few lineMetrics entries:\n";
+  // int count = 0;
+  // for (const auto &entry : lineMetrics) {
+  //   const std::string &file = entry.first.first;
+  //   int line = entry.first.second;
+  //   const CacheMetrics &cm = entry.second;
+
+  //   errs() << "  " << file << ":" << line
+  //         << "  Dr=" << cm.Dr
+  //         << "  D1mr=" << cm.D1mr
+  //         << "  DLmr=" << cm.DLmr
+  //         << "  Dw=" << cm.Dw
+  //         << "  D1mw=" << cm.D1mw
+  //         << "  DLmw=" << cm.DLmw << "\n";
+
+  //   if (++count >= 20) break; // avoid printing thousands of lines
+  // }
     return !lineMetrics.empty();
   }
 
@@ -261,9 +290,11 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
             continue;
 
           std::string FileName = Scope->getFilename().str();
+          FileName = normalizeFileName(FileName);
           int Line = DL.getLine();
 
           FileLinePair fl(FileName, Line);
+
 
           if (!isHotLine(fl))
             continue;

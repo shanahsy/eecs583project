@@ -110,7 +110,6 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
       }
 
       ++lineNumber;
-      errs() << line << "\n";
 
       // just double check that a line entry is either a digit or .
       // otherwise skip to be safe

@@ -35,6 +35,9 @@ Example: run `CacheOptPass` on `bad_matrix_walk.c` to dump all load/store → (f
 
 From `build/`:
 ```bash
+clang -O0 -g \
+  ../benchmarks/bad_matrix_walk.c \
+  -o bad_matrix_walk.out
 clang -O0 -g -emit-llvm -S \
   ../benchmarks/bad_matrix_walk.c \
   -o bad_matrix_walk.ll
@@ -42,15 +45,22 @@ clang -O0 -g -emit-llvm -S \
 - -O0 so LLVM doesn’t optimize away the loops/loads.
 - -g so debug info exists (we can map to source file + line).
 
-### 2. Run the LLVM pass plugin
+### 2. Running Cachegrind
+From `build/`:
+```bash
+valgrind --tool=cachegrind ./bad_matrix_walk.out -o cachegrind.out
+cg_annotate --auto=yes --show-percs=no ./cachegrind.out > cg-annotate.out
+```
+
+### 3. Run the LLVM pass plugin
 
 From `build/`:
 ```bash
 opt \
-  -load-pass-plugin ./profiler/CacheOptPass.so \
-  -passes="cache-opt" \
+  -load-pass-plugin ./profiler/ParseCachegrindPass.so \
+  -passes="parse-cachegrind" \
+  -cache-cg-file=cg-annotate.out
   bad_matrix_walk.ll \
-  -disable-output > load_store_map.csv
 ```
 
 This:

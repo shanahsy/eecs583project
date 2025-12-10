@@ -3,12 +3,16 @@
 #include "llvm/Passes/PassPlugin.h"
 
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm> // for std::remove
 #include <cstdint>
 #include <fstream>
 #include <llvm/MC/MCFragment.h>
@@ -23,6 +27,11 @@ typedef std::pair<std::string, int> FileLinePair;
 static cl::opt<std::string> CacheCGFile("cache-cg-file",
                                         cl::desc("Path to cg_annotate output"),
                                         cl::init(""));
+
+static cl::opt<uint64_t> MissThreshold(
+    "cache-miss-threshold",
+    cl::desc("Total data cache misses (D1mr+DLmr+D1mw+DLmw) needed to prefetch"),
+    cl::init(1000)); // Subject to change
 
 // Constants
 const std::string AutoAnnotatedPrefix = "-- Auto-annotated source:";
@@ -46,6 +55,52 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
 
   /// Maps filenames & line numbers to the cachegrind information
   std::map<FileLinePair, CacheMetrics> lineMetrics;
+
+  bool isHotLine(const FileLinePair &fl) {
+    auto it = lineMetrics.find(fl);
+    if (it == lineMetrics.end())
+      return false;
+
+    const CacheMetrics &cm = it->second;
+    uint64_t totalMisses = cm.D1mr + cm.DLmr + cm.D1mw + cm.DLmw;
+    return totalMisses >= MissThreshold;
+  }
+
+    bool insertPrefetch(Instruction *I) {
+    IRBuilder<> Builder(I);
+
+    Value *Addr = nullptr;
+
+    if (auto *LI = dyn_cast<LoadInst>(I)) {
+      Addr = LI->getPointerOperand();
+    } else if (auto *SI = dyn_cast<StoreInst>(I)) {
+      Addr = SI->getPointerOperand();
+    } else {
+      return false; // not a load/store
+    }
+
+    Module *M = I->getModule();
+    LLVMContext &Ctx = M->getContext();
+
+    // Cast to i8* as required by llvm.prefetch
+    Type *I8PtrTy = Type::getInt8Ty(Ctx)->getPointerTo();
+    Value *AddrI8 = Builder.CreateBitCast(Addr, I8PtrTy);
+
+    // declare void @llvm.prefetch.p0(i8* addr, i32 rw, i32 locality, i32 cache_type)
+    Function *PrefetchFn =
+        Intrinsic::getDeclaration(M, Intrinsic::prefetch, {I8PtrTy});
+
+    // rw: 0 = read, 1 = write
+    // locality: 0 (none) .. 3 (high)
+    // cache_type: 1 = data cache
+    Value *RW = Builder.getInt32(0);        // assume read prefetch for now
+    Value *Locality = Builder.getInt32(3);  // guess high locality
+    Value *CacheType = Builder.getInt32(1); // data cache
+
+    Builder.CreateCall(PrefetchFn, {AddrI8, RW, Locality, CacheType});
+    return true;
+  }
+
 
   bool parseInputFile(const std::string &path) {
     std::ifstream ifs(path);
@@ -158,7 +213,7 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
     return !lineMetrics.empty();
   }
 
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
+    PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
 
     if (CacheCGFile.empty()) {
       errs() << "No file provided via -cache-cg-file\n";
@@ -170,8 +225,8 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
       return PreservedAnalyses::all();
     }
 
+    // Optional: keep this for debugging
     errs() << "===== Parsed Cachegrind Line Metrics =====\n";
-
     for (const auto &entry : lineMetrics) {
       const auto &file = entry.first.first;
       int line = entry.first.second;
@@ -181,11 +236,50 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
              << "  DLmr=" << cm.DLmr << "  Dw=" << cm.Dw << "  D1mw=" << cm.D1mw
              << "  DLmw=" << cm.DLmw << "\n";
     }
-
     errs() << "===== End of Cachegrind Metrics =====\n";
 
-    return PreservedAnalyses::all();
+    bool Changed = false;
+
+    // Walk all functions/blocks/instructions
+    for (Function &F : M) {
+      if (F.isDeclaration())
+        continue;
+
+      for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+          // Only care about loads and stores
+          if (!isa<LoadInst>(&I) && !isa<StoreInst>(&I))
+            continue;
+
+          // Need debug info to map back to source line
+          const DebugLoc &DL = I.getDebugLoc();
+          if (!DL)
+            continue;
+
+          auto *Scope = dyn_cast<DIScope>(DL.getScope());
+          if (!Scope)
+            continue;
+
+          std::string FileName = Scope->getFilename().str();
+          int Line = DL.getLine();
+
+          FileLinePair fl(FileName, Line);
+
+          if (!isHotLine(fl))
+            continue;
+
+          errs() << "Inserting prefetch for hot line " << FileName << ":"
+                 << Line << "\n";
+
+          if (insertPrefetch(&I))
+            Changed = true;
+        }
+      }
+    }
+
+    return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
   }
+
 };
 
 extern "C" PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK llvmGetPassPluginInfo() {

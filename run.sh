@@ -140,10 +140,10 @@ opt \
   "$IR_ORIG" -o "$IR_OPT"
 
 ###############################################
-# STEP 6: Build optimized binary
+# STEP 6: Build new binary
 ###############################################
-echo "[6] Building optimized binary…"
-clang -O2 "$IR_OPT" -o "$BIN_OPT"
+echo "[6] Building new binary…"
+clang -O0 -g "$IR_OPT" -o "$BIN_OPT"
 
 ###############################################
 # STEP 7: Cachegrind optimized
@@ -164,11 +164,30 @@ cg_annotate --auto=yes --show-percs=no "$CG_RAW_OPT" > "$CG_ANN_OPT"
 # SUMMARY
 ###############################################
 
+print_program_totals_line() {
+    local line="$1"
+
+    # Extract the first 9 numeric fields (Ir, I1mr, ILmr, Dr, D1mr, DLmr, Dw, D1mw, DLmw)
+    # and ignore "PROGRAM TOTALS"
+    read -r ir i1mr ilmr dr d1mr dlmr dw d1mw dlmw _ <<< "$line"
+
+    # Print table header
+    printf "%-12s %-8s %-8s %-12s %-8s %-8s %-12s %-8s %-8s\n" \
+        "Ir" "I1mr" "ILmr" "Dr" "D1mr" "DLmr" "Dw" "D1mw" "DLmw"
+
+    # Print formatted row
+    printf "%-12s %-8s %-8s %-12s %-8s %-8s %-12s %-8s %-8s\n" \
+        "$ir" "$i1mr" "$ilmr" "$dr" "$d1mr" "$dlmr" "$dw" "$d1mw" "$dlmw"
+}
+
+
 echo -e "\n================ BASELINE =================="
-grep "PROGRAM TOTALS" -A1 "$CG_ANN"
+totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN")
+print_program_totals_line "$totals_line"
 
 echo -e "\n================ OPTIMIZED =================="
-grep "PROGRAM TOTALS" -A1 "$CG_ANN_OPT"
+totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN_OPT")
+print_program_totals_line "$totals_line"
 
 ###############################################
 # CLEANUP

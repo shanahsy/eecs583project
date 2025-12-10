@@ -48,7 +48,7 @@ clang -O0 -g -emit-llvm -S \
 ### 2. Running Cachegrind
 From `build/`:
 ```bash
-valgrind --tool=cachegrind ./bad_matrix_walk.out --cachegrind-out-file=cachegrind.out
+valgrind --tool=cachegrind --cachegrind-out-file=cachegrind.out ./bad_matrix_walk.out
 cg_annotate --auto=yes --show-percs=no ./cachegrind.out > cg-annotate.out
 ```
 

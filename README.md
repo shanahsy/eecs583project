@@ -59,8 +59,8 @@ From `build/`:
 opt \
   -load-pass-plugin ./profiler/ParseCachegrindPass.so \
   -passes="parse-cachegrind" \
-  -cache-cg-file=cg-annotate.out
-  bad_matrix_walk.ll \
+  -cache-cg-file=cg-annotate.out \
+  bad_matrix_walk.ll
 ```
 
 This:

@@ -65,6 +65,7 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
         currentFile =
             std::regex_replace(filename, std::regex("^ +| +$|( ) +"), "$1");
         lineNumber = 0;
+        std::getline(ifs, line); // skips first ------ block
         // now inside a code block, reset line number and start looking at next
         // lines
         continue;
@@ -109,6 +110,7 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
       }
 
       ++lineNumber;
+      errs() << line << "\n";
 
       // just double check that a line entry is either a digit or .
       // otherwise skip to be safe

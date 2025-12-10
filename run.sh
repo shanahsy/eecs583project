@@ -125,7 +125,7 @@ valgrind --tool=cachegrind \
 # STEP 4: Annotate Cachegrind output
 ###############################################
 echo "[4] Running cg_annotate…"
-cg_annotate "$CG_RAW" > "$CG_ANN"
+cg_annotate --auto=yes --show-percs=no "$CG_RAW" > "$CG_ANN"
 
 ###############################################
 # STEP 5: Apply the LLVM optimization pass
@@ -156,7 +156,7 @@ valgrind --tool=cachegrind \
 # STEP 8: Annotate optimized output
 ###############################################
 echo "[8] Running cg_annotate on optimized output…"
-cg_annotate "$CG_RAW_OPT" > "$CG_ANN_OPT"
+cg_annotate --auto=yes --show-percs=no "$CG_RAW_OPT" > "$CG_ANN_OPT"
 
 ###############################################
 # SUMMARY

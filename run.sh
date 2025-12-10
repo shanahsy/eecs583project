@@ -63,6 +63,8 @@ if [ $# -lt 1 ]; then
 fi
 
 SRC_FILE=$1
+shift
+PROG_ARGS=("$@")
 
 if [ ! -f "$SRC_FILE" ]; then
     echo "Error: $SRC_FILE does not exist."
@@ -119,7 +121,7 @@ echo "[3] Running Cachegrind baseline…"
 valgrind --tool=cachegrind \
   --cache-sim=yes --branch-sim=no \
   --cachegrind-out-file="$CG_RAW" \
-  "$BIN_ORIG" 
+  "$BIN_ORIG" "${PROG_ARGS[@]}"
 
 ###############################################
 # STEP 4: Annotate Cachegrind output
@@ -150,7 +152,7 @@ echo "[7] Running Cachegrind optimized version…"
 valgrind --tool=cachegrind \
   --cache-sim=yes --branch-sim=no \
   --cachegrind-out-file="$CG_RAW_OPT" \
-  "./$BIN_OPT"
+  "./$BIN_OPT" "${PROG_ARGS[@]}"
 
 ###############################################
 # STEP 8: Annotate optimized output

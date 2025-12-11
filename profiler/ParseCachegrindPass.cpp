@@ -28,10 +28,11 @@ static cl::opt<std::string> CacheCGFile("cache-cg-file",
                                         cl::desc("Path to cg_annotate output"),
                                         cl::init(""));
 
-static cl::opt<uint64_t> MissThreshold(
-    "cache-miss-threshold",
-    cl::desc("Total data cache misses (D1mr+DLmr+D1mw+DLmw) needed to prefetch"),
-    cl::init(100)); // Subject to change
+// NEW: relative threshold instead of fixed 100
+static cl::opt<double> PrefetchFraction(
+    "prefetch-threshold-fraction",
+    cl::desc("Fraction of per-program max misses used as prefetch threshold"),
+    cl::init(0.60)); // 10% of max misses by default
 
 // Constants
 const std::string AutoAnnotatedPrefix = "-- Auto-annotated source:";
@@ -65,29 +66,34 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
   /// Maps filenames & line numbers to the cachegrind information
   std::map<FileLinePair, CacheMetrics> lineMetrics;
 
+  // NEW: per-module threshold computed from max misses
+  uint64_t ThresholdMisses = 0;
+
   bool isHotLine(const FileLinePair &fl) {
-    // errs() << "Looking for fl: " << fl.first << "\n" << fl.second << "\n";
     auto it = lineMetrics.find(fl);
     if (it == lineMetrics.end())
       return false;
 
     const CacheMetrics &cm = it->second;
     uint64_t totalMisses = cm.D1mr + cm.DLmr + cm.D1mw + cm.DLmw;
-    return totalMisses >= MissThreshold;
+
+    if (ThresholdMisses == 0)
+      return false; // threshold not initialized / no misses
+
+    return totalMisses >= ThresholdMisses;
   }
 
-    bool insertPrefetch(Instruction *I) {
+  bool insertPrefetch(Instruction *I) {
     IRBuilder<> Builder(I);
 
     Value *Addr = nullptr;
 
-    if (auto *LI = dyn_cast<LoadInst>(I)) {
-      Addr = LI->getPointerOperand();
-    } else if (auto *SI = dyn_cast<StoreInst>(I)) {
-      Addr = SI->getPointerOperand();
-    } else {
-      return false; // not a load/store
-    }
+    auto *LI = dyn_cast<LoadInst>(I);
+    if (!LI)
+      return false;           // ignore stores for now
+
+    Addr = LI->getPointerOperand();
+
 
     Module *M = I->getModule();
     LLVMContext &Ctx = M->getContext();
@@ -111,7 +117,6 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
     return true;
   }
 
-
   bool parseInputFile(const std::string &path) {
     std::ifstream ifs(path);
     if (!ifs) {
@@ -125,16 +130,15 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
     while (std::getline(ifs, line)) {
       // if line is the start of the annotated cache info (code block)
       if (line.rfind(AutoAnnotatedPrefix, 0) == 0) {
-      auto filename = line.substr(AutoAnnotatedPrefix.size());
-      std::string trimmed =
-          std::regex_replace(filename, std::regex("^ +| +$|( ) +"), "$1");
+        auto filename = line.substr(AutoAnnotatedPrefix.size());
+        std::string trimmed =
+            std::regex_replace(filename, std::regex("^ +| +$|( ) +"), "$1");
 
-      currentFile = normalizeFileName(trimmed);
-      lineNumber = 0;
-      std::getline(ifs, line); // skips first ------ block
-      continue;
-    }
-
+        currentFile = normalizeFileName(trimmed);
+        lineNumber = 0;
+        std::getline(ifs, line); // skips first ------ block
+        continue;
+      }
 
       // if we're at the end of an annotated block
       // added line number check since beginning block after filename has the
@@ -164,7 +168,7 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
       // left trim the spaces
       auto trimmedLine = std::regex_replace(line, std::regex("^ +"), "$1");
 
-      // handle line skips ex "-- line 39 --------------"
+      // handle line skips ex "-- line 39 --------------
       if (trimmedLine.rfind("-- line", 0) == 0) {
         // after "-- line " comes the number
         std::stringstream ss(trimmedLine.substr(std::strlen("-- line")));
@@ -178,7 +182,6 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
 
       // just double check that a line entry is either a digit or .
       // otherwise skip to be safe
-      char firstField = trimmedLine[0];
       if (trimmedLine.empty() ||
           !std::isdigit(static_cast<unsigned char>(trimmedLine[0]))) {
         continue;
@@ -221,28 +224,10 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
     errs() << "Parsed " << lineMetrics.size()
            << " annotated lines from cachegrind\n";
 
-  //   // Remove: just for debugging
-  //   errs() << "[parseInputFile] Dumping first few lineMetrics entries:\n";
-  // int count = 0;
-  // for (const auto &entry : lineMetrics) {
-  //   const std::string &file = entry.first.first;
-  //   int line = entry.first.second;
-  //   const CacheMetrics &cm = entry.second;
-
-  //   errs() << "  " << file << ":" << line
-  //         << "  Dr=" << cm.Dr
-  //         << "  D1mr=" << cm.D1mr
-  //         << "  DLmr=" << cm.DLmr
-  //         << "  Dw=" << cm.Dw
-  //         << "  D1mw=" << cm.D1mw
-  //         << "  DLmw=" << cm.DLmw << "\n";
-
-  //   if (++count >= 20) break; // avoid printing thousands of lines
-  // }
     return !lineMetrics.empty();
   }
 
-    PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
 
     if (CacheCGFile.empty()) {
       errs() << "No file provided via -cache-cg-file\n";
@@ -254,6 +239,28 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
       return PreservedAnalyses::all();
     }
 
+    // NEW: compute max misses and per-program threshold
+    uint64_t MaxMisses = 0;
+    for (const auto &entry : lineMetrics) {
+      const CacheMetrics &cm = entry.second;
+      uint64_t totalMisses = cm.D1mr + cm.DLmr + cm.D1mw + cm.DLmw;
+      if (totalMisses > MaxMisses)
+        MaxMisses = totalMisses;
+    }
+
+    if (MaxMisses == 0) {
+      errs() << "No data cache misses recorded; skipping prefetch insertion.\n";
+      return PreservedAnalyses::all();
+    }
+
+    ThresholdMisses =
+        static_cast<uint64_t>(PrefetchFraction * static_cast<double>(MaxMisses));
+    if (ThresholdMisses == 0)
+      ThresholdMisses = MaxMisses; // fallback if fraction is tiny
+
+    errs() << "Max misses: " << MaxMisses
+           << ", prefetch threshold: " << ThresholdMisses << "\n";
+
     // Optional: keep this for debugging
     errs() << "===== Parsed Cachegrind Line Metrics =====\n";
     for (const auto &entry : lineMetrics) {
@@ -261,9 +268,12 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
       int line = entry.first.second;
       const CacheMetrics &cm = entry.second;
 
-      errs() << file << ":" << line << "  Dr=" << cm.Dr << "  D1mr=" << cm.D1mr
-             << "  DLmr=" << cm.DLmr << "  Dw=" << cm.Dw << "  D1mw=" << cm.D1mw
-             << "  DLmw=" << cm.DLmw << "\n";
+      uint64_t totalMisses = cm.D1mr + cm.DLmr + cm.D1mw + cm.DLmw;
+
+      errs() << file << ":" << line << "  Dr=" << cm.Dr
+             << "  D1mr=" << cm.D1mr << "  DLmr=" << cm.DLmr
+             << "  Dw=" << cm.Dw << "  D1mw=" << cm.D1mw
+             << "  DLmw=" << cm.DLmw << "  Misses=" << totalMisses << "\n";
     }
     errs() << "===== End of Cachegrind Metrics =====\n";
 
@@ -294,7 +304,6 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
           int Line = DL.getLine();
 
           FileLinePair fl(FileName, Line);
-
 
           if (!isHotLine(fl))
             continue;

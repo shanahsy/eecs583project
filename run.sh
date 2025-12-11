@@ -115,6 +115,16 @@ echo "[2] Building baseline binary…"
 clang -O0 -g "$SRC_FILE" -o "$BIN_ORIG"
 
 ###############################################
+# STEP 2.5: Time baseline (real wall-clock)
+###############################################
+echo "[2.5] Timing baseline (wall-clock)…"
+for i in {1..5}; do
+  /usr/bin/time -f "BASE run $i  real %E  user %U  sys %S" \
+    "$BIN_ORIG" "${PROG_ARGS[@]}" >/dev/null
+done
+
+
+###############################################
 # STEP 3: Run baseline Cachegrind
 ###############################################
 echo "[3] Running Cachegrind baseline…"
@@ -144,6 +154,15 @@ opt \
 ###############################################
 echo "[6] Building new binary…"
 clang -O0 -g "$IR_OPT" -o "$BIN_OPT"
+
+###############################################
+# STEP 6.5: Time optimized (real wall-clock)
+###############################################
+echo "[6.5] Timing optimized (wall-clock)…"
+for i in {1..5}; do
+  /usr/bin/time -f "OPT  run $i  real %E  user %U  sys %S" \
+    "$BIN_OPT" "${PROG_ARGS[@]}" >/dev/null
+done
 
 ###############################################
 # STEP 7: Cachegrind optimized

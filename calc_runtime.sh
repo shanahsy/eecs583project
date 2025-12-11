@@ -13,7 +13,7 @@ PASS="./build/profiler/ParseCachegrindPass.so"
 CLEAN=true     # set to false if you want to keep IR/output files
 
 # Threshold values to sweep for the LLVM pass
-THRESHOLDS=(100 500 1000 5000 10000 20000 30000 40000 50000)
+THRESHOLDS=(0 500 50000000 100000000 150000000 200000000 250000000 300000000)
 
 # Number of runs for averaging
 NUM_RUNS=10
@@ -242,6 +242,9 @@ echo "[10] Generating plot of avg runtime vs threshold…"
 python3 - << EOF
 import matplotlib.pyplot as plt
 
+# Baseline average from the bash script
+baseline = float("$BASE_AVG")
+
 xs = []
 ys = []
 with open("$THRESH_DATA", "r") as f:
@@ -254,11 +257,15 @@ with open("$THRESH_DATA", "r") as f:
         ys.append(float(t_str))
 
 plt.figure()
-plt.plot(xs, ys, marker="o")
+plt.plot(xs, ys, marker="o", label="Optimized (varying threshold)")
+# Baseline as a horizontal red dashed line
+plt.axhline(y=baseline, color="red", linestyle="--", label=f"Baseline = {baseline:.4f}s")
+
 plt.xlabel("cache-miss-threshold")
 plt.ylabel("Average runtime (s)")
 plt.title("Runtime vs Miss Threshold for $BASENAME")
 plt.grid(True)
+plt.legend()
 plt.tight_layout()
 plt.savefig("$THRESH_PLOT")
 EOF

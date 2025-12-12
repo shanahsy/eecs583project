@@ -228,14 +228,23 @@ run_one_benchmark() {
           "$ir" "$i1mr" "$ilmr" "$dr" "$d1mr" "$dlmr" "$dw" "$d1mw" "$dlmw"
   }
 
+  # echo -e "\n  --- BASELINE ---"
+  # local totals_line
+  # totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN" | tail -n1)
+  # print_program_totals_line "$totals_line"
+
+  # echo -e "\n  --- OPTIMIZED ---"
+  # totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN_OPT" | tail -n1)
+  # print_program_totals_line "$totals_line"
   echo -e "\n  --- BASELINE ---"
   local totals_line
-  totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN" | tail -n1)
+  totals_line=$(grep "PROGRAM TOTALS" "$CG_ANN")
   print_program_totals_line "$totals_line"
 
   echo -e "\n  --- OPTIMIZED ---"
-  totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN_OPT" | tail -n1)
+  totals_line=$(grep "PROGRAM TOTALS" "$CG_ANN_OPT")
   print_program_totals_line "$totals_line"
+
 
   # Percentage change in runtime
   local PERC

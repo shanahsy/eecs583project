@@ -33,7 +33,8 @@ static cl::opt<std::string> CacheCGFile(
 static cl::opt<uint64_t> MissThreshold(
     "cache-miss-threshold",
     cl::desc("Total data cache misses (D1mr+DLmr+D1mw+DLmw) needed to prefetch"),
-    cl::init(3000000000)); // tweak via CLI
+    // cl::init(3000000000)); // tweak via CLI
+    cl::init(100)); 
 
 static cl::opt<unsigned> PrefetchDistance(
     "cache-prefetch-distance",

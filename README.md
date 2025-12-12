@@ -22,7 +22,7 @@ We built a full automated pipeline (`run.sh`) that:
 ---
 
 ## Requirements
-To reproduce our results, we recommend running the scripts on on the EECS583A server instead of the B server:
+To reproduce our results, we recommend running the scripts on the EECS583A server instead of the B server:
 
 ```eecs583a.eecs.umich.edu```
 

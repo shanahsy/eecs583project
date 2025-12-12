@@ -7,7 +7,7 @@ This repo contains our EECS 583 term project:
 
 This project implements a Cachegrind-guided LLVM optimization pass that inserts llvm.prefetch instructions for memory operations responsible for high cache-miss counts.
 
-We built a full automated pipeline (run2.sh) that:
+We built a full automated pipeline (run.sh) that:
 
 1. Compiles the program normally (baseline).
 

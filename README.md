@@ -22,11 +22,11 @@ We built a full automated pipeline (`run.sh`) that:
 ---
 
 ## Requirements
-To reproduce our results, the experiments must be run on the EECS583A server:
+To reproduce our results, we recommend running the scripts on on the EECS583A server instead of the B server:
 
 ```eecs583a.eecs.umich.edu```
 
-Do NOT run on eecs583b — that machine has a newer, more aggressive CPU microarchitecture with built-in hardware prefetchers. On that machine, software prefetching provides little or inconsistent benefit, which masks the improvements made by our pass.
+All testing was conducted on the EECS583A server.
 
 ## Building the LLVM Pass
 The pass is located under:

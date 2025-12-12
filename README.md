@@ -51,7 +51,7 @@ You’ll get:
 
 ## Running the pass on a benchmark
 From the root of the repository, run:
-```./run2.sh ./benchmarks/matmul_bad.c```
+```./run.sh ./benchmarks/matmul_bad.c```
 
 
 This executes the entire workflow:

@@ -1,1 +1,2 @@
-add_llvm_pass_plugin(CacheOptPass CacheOptPass.cpp)
+# add_llvm_pass_plugin(CacheOptPass CacheOptPass.cpp)
+add_llvm_pass_plugin(ParseCachegrindPass ParseCachegrindPass.cpp)

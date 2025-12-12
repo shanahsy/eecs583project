@@ -1,74 +1,77 @@
 #!/usr/bin/env bash
-# Run script for Homework 2 CSE 583 Fall 2025
-# e.g. sh run.sh benchmarks/correctness/hw2correct1.c
+# Automated pipeline for Cachegrind-guided optimization
+# Usage:
+#   ./run.sh <sourcefile.c>
+#   ./run.sh <directory_with_c_files>
+
 set -e
 
-# ACTION NEEDED: If the path is different, please update it here.
-LIB="build/hw2pass/HW2Pass.so"
+###############################################
+# CONFIG
+###############################################
 
-if [ ! -f "$LIB" ]; then
-    echo "Could not find $LIB. Please build your pass or correct the path in the script."
-    exit 1
-fi
-
-PATH2LIB=$(realpath "$LIB")
-
-CURRENT_DIR=$(pwd)
-CORRECTNESS_PASS=fplicm-correctness
-PERFORMANCE_PASS=fplicm-performance
-
-# Default to correctness pass
-SELECTED_PASS=fplicm-correctness
-flag_set=false
-generate_viz=false
+PASS="./build/profiler/ParseCachegrindPass.so"
+CLEAN=true     # set to false if you want to keep IR/output files
+NUM_RUNS=5     # runs per benchmark for timing
 
 show_help() {
   cat << EOF
-Usage: $0 [-c|-p][-v] <source_file>
+Usage: $0 <source_file.c | directory> [program args...]
+
+Runs entire workflow:
+  0. Compile LLVM Pass
+  1. Compile to LLVM IR
+  2. Build baseline binary
+  2.5 Time baseline over ${NUM_RUNS} runs
+  3. Run Cachegrind
+  4. Run cg_annotate
+  5. Apply CacheOpt LLVM pass
+  6. Build optimized binary
+  6.5 Time optimized over ${NUM_RUNS} runs
+  7. Run Cachegrind again
+  8. Print cache stats
+
+If <source_file.c> is a directory, runs the pipeline for every *.c
+file in that directory and prints the average % runtime change,
+plus the best (most negative) and worst (most positive) % change.
 
 Options:
-  -c                Run the correctness pass (default)
-  -p                Run the performance pass
-  -v                Generate visualization of CFG
-  -h                Show this help message and exit
+  -k      Keep intermediate files (no cleanup)
+  -h      Show help
 
-Arguments:
-  <source_file>     Path to benchmark file (.c)
-
-Examples:
-  $0 benchmarks/correctness/hw2correct1.c
-  $0 -c benchmarks/correctness/hw2correct2.c
-  $0 -v benchmarks/correctness/hw2correct1.c
-  $0 -p benchmarks/performance/hw2perf1.c
+Example:
+  $0 ./benchmarks/chat_benchmarks/matmul_bad.c
+  $0 ./benchmarks/chat_benchmarks
 EOF
 }
 
-# Parse options
-while getopts ":cpvh" opt; do
+###############################################
+# HELPER: measure average runtime over N runs
+###############################################
+measure_avg_time() {
+  local runs="$1"
+  shift
+  local bin="$1"
+  shift
+
+  local sum="0.0"
+  for ((i=1; i<=runs; ++i)); do
+    # %e = real time in seconds (float)
+    local t
+    t=$(/usr/bin/time -f "%e" "$bin" "$@" 2>&1 >/dev/null)
+    sum=$(echo "$sum + $t" | bc -l)
+  done
+
+  echo "scale=6; $sum / $runs" | bc -l
+}
+
+###############################################
+# PARSE FLAGS
+###############################################
+while getopts ":kh" opt; do
     case $opt in
-        c)
-            if $flag_set; then
-                echo "Error: -c and -p cannot be used together" >&2
-                exit 1
-            fi
-            SELECTED_PASS=fplicm-correctness
-            flag_set=true
-            ;;
-        p)
-            if $flag_set; then
-                echo "Error: -c and -p cannot be used together" >&2
-                exit 1
-            fi
-            SELECTED_PASS=fplicm-performance
-            flag_set=true
-            ;;
-        v)
-            generate_viz=true
-            ;;
-        h)
-            show_help
-            exit 0
-            ;;
+        k) CLEAN=false ;;
+        h) show_help; exit 0 ;;
         \?)
             echo "Invalid option: -$OPTARG" >&2
             show_help
@@ -77,129 +80,285 @@ while getopts ":cpvh" opt; do
     esac
 done
 
-# Shift away parsed options
 shift $((OPTIND -1))
 
-# Check for required positional argument
+###############################################
+# CHECK ARGUMENT
+###############################################
 if [ $# -lt 1 ]; then
-    echo "Error: Missing required argument" >&2
+    echo "Error: Missing <source_file.c | directory>"
     show_help
     exit 1
 fi
 
-if [ ! -f $1 ]; then
-    echo "Error: $1 is not a valid file" >&2
-    show_help
+TARGET=$1
+shift
+PROG_ARGS=("$@")
+
+if [ ! -f "$PASS" ]; then
+    echo "ERROR: Could not find LLVM pass at: $PASS"
     exit 1
 fi
 
-SRC_FILE=$1
-FILE_BASENAME=$(basename $SRC_FILE)
-FILENAME=${FILE_BASENAME%.*}
+###############################################
+# STEP 0: Compile LLVM Pass ONCE
+###############################################
+echo "[0] Compiling LLVM Pass…"
+cmake --build ./build/ -j
 
-cd $(dirname $SRC_FILE)
+###############################################
+# PER-BENCHMARK PIPELINE
+###############################################
+run_one_benchmark() {
+  local SRC_FILE="$1"
 
-# Delete outputs from previous runs. Update this when you want to retain some files.
-rm -f default.profraw *_prof *_fplicm *.bc *.profdata *_output *.ll
+  if [ ! -f "$SRC_FILE" ]; then
+      echo "Error: $SRC_FILE does not exist."
+      return 1
+  fi
 
-# Convert source code to bitcode (IR).
-clang -emit-llvm -c ${FILENAME}.c -Xclang -disable-O0-optnone -o ${FILENAME}.bc
+  echo
+  echo "==================== Benchmark: $SRC_FILE ===================="
 
-# Canonicalize natural loops (Ref: llvm.org/doxygen/LoopSimplify_8h_source.html)
-opt -passes='loop-simplify' ${FILENAME}.bc -o ${FILENAME}.ls.bc
+  local BASENAME NAME
+  local IR_ORIG IR_OPT BIN_ORIG BIN_OPT
+  local CG_RAW CG_ANN CG_RAW_OPT CG_ANN_OPT
 
-# Instrument profiler passes.
-opt -passes='pgo-instr-gen,instrprof' ${FILENAME}.ls.bc -o ${FILENAME}.ls.prof.bc
+  BASENAME=$(basename "$SRC_FILE")
+  NAME="./build/${BASENAME%.*}"
 
-# Generate binary executable with profiler embedded
-clang -fprofile-instr-generate ${FILENAME}.ls.prof.bc -o ${FILENAME}_prof
+  IR_ORIG="$NAME.ll"
+  IR_OPT="$NAME.opt.ll"
+  BIN_ORIG="$NAME.orig"
+  BIN_OPT="$NAME.opt"
+  CG_RAW="$NAME.cg"
+  CG_ANN="$NAME.cgann"
+  CG_RAW_OPT="$NAME.opt.cg"
+  CG_ANN_OPT="$NAME.opt.cgann"
 
-# When we run the profiler embedded executable, it generates a default.profraw file that contains the profile data.
-./${FILENAME}_prof > correct_output
+  # Clean old files for this benchmark (best-effort)
+  rm -f "$IR_ORIG" "$IR_OPT" "$BIN_ORIG" "$BIN_OPT" \
+        "$CG_RAW" "$CG_ANN" "$CG_RAW_OPT" "$CG_ANN_OPT"
 
-# Converting it to LLVM form. This step can also be used to combine multiple profraw files,
-# in case you want to include different profile runs together.
-llvm-profdata merge -o ${FILENAME}.profdata default.profraw
+  ###############################################
+  # STEP 1: Compile original program to LLVM IR
+  ###############################################
+  echo "[1] Compiling to LLVM IR…"
+  clang -O0 -g -emit-llvm -S "$SRC_FILE" -o "$IR_ORIG"
 
-# The "Profile Guided Optimization Use" pass attaches the profile data to the bc file.
-opt -passes="pgo-instr-use" -o ${FILENAME}.profdata.bc -pgo-test-profile-file=${FILENAME}.profdata < ${FILENAME}.ls.prof.bc > /dev/null
+  ###############################################
+  # STEP 2: Build baseline binary
+  ###############################################
+  echo "[2] Building baseline binary…"
+  clang -O0 -g "$SRC_FILE" -o "$BIN_ORIG"
 
-# We now use the profile augmented bc file as input to your pass.
-opt -S -load-pass-plugin="${PATH2LIB}" -passes="${SELECTED_PASS}" ${FILENAME}.profdata.bc -o ${FILENAME}.fplicm.bc > /dev/null
+  ###############################################
+  # STEP 2.5: Time baseline (real wall-clock)
+  ###############################################
+  echo "[2.5] Timing baseline (wall-clock, ${NUM_RUNS} runs)…"
+  local BASE_AVG
+  BASE_AVG=$(measure_avg_time "$NUM_RUNS" "$BIN_ORIG" "${PROG_ARGS[@]}")
+  echo "  BASELINE average: ${BASE_AVG} s"
 
-# Generate binary excutable before FPLICM: Unoptimzed code
-clang ${FILENAME}.ls.bc -o ${FILENAME}_no_fplicm 
-# Generate binary executable after FPLICM: Optimized code
-clang ${FILENAME}.fplicm.bc -o ${FILENAME}_fplicm
+  ###############################################
+  # STEP 3: Run baseline Cachegrind
+  ###############################################
+  echo "[3] Running Cachegrind baseline…"
+  valgrind --tool=cachegrind \
+    --cache-sim=yes --branch-sim=no \
+    --cachegrind-out-file="$CG_RAW" \
+    "$BIN_ORIG" "${PROG_ARGS[@]}"
 
-# Produce output from binary to check correctness
-./${FILENAME}_fplicm > fplicm_output
+  ###############################################
+  # STEP 4: Annotate Cachegrind output
+  ###############################################
+  echo "[4] Running cg_annotate…"
+  cg_annotate --auto=yes --show-percs=no "$CG_RAW" > "$CG_ANN"
 
-echo -e "\n=== Program Correctness Validation ==="
-if [ "$(diff correct_output fplicm_output)" != "" ]; then
-    echo -e ">> Outputs do not match\n"
-else
-    echo -e ">> Outputs match\n"
-    # Measure performance
-    echo -e "1. Performance of unoptimized code"
-    time ./${FILENAME}_no_fplicm > /dev/null
-    echo -e "\n"
-    echo -e "2. Performance of optimized code"
-    time ./${FILENAME}_fplicm > /dev/null
-    echo -e "\n"
-fi
+  ###############################################
+  # STEP 5: Apply the LLVM optimization pass
+  ###############################################
+  echo "[5] Running CacheOpt LLVM pass…"
+  opt \
+    -load-pass-plugin "$PASS" \
+    -passes="parse-cachegrind" \
+    -cache-cg-file="$CG_ANN" \
+    "$IR_ORIG" -o "$IR_OPT"
 
-generate_cfg_viz() {
-    VIZ_TYPE=cfg
-    OUTPUT_DIR=$CURRENT_DIR/dot     # will put .pdf file here
-    TMP_DIR=$OUTPUT_DIR/tmp         # will put .dot files here
-    BITCODE_DIR=$(pwd)
-    BENCH=$1
+  ###############################################
+  # STEP 6: Build new binary
+  ###############################################
+  echo "[6] Building new binary…"
+  clang -O0 -g "$IR_OPT" -o "$BIN_OPT"
 
-    mkdir -p $OUTPUT_DIR
-    mkdir -p $TMP_DIR
-    cd $TMP_DIR
+  ###############################################
+  # STEP 6.5: Time optimized (real wall-clock)
+  ###############################################
+  echo "[6.5] Timing optimized (wall-clock, ${NUM_RUNS} runs)…"
+  local OPT_AVG
+  OPT_AVG=$(measure_avg_time "$NUM_RUNS" "$BIN_OPT" "${PROG_ARGS[@]}")
+  echo "  OPTIMIZED average: ${OPT_AVG} s"
 
-    # If profile data available, use it
-    PROF_FLAGS=""
-    PROF_DATA=$BITCODE_DIR/$BENCH.profdata
-    if [ $VIZ_TYPE = "cfg" ]; then
-    if [ -f $PROF_DATA ]; then
-        echo "Using prof data in visualization"
-        PROF_FLAGS="-cfg-weights"
-    else
-        echo "No prof data, not including it in visualization"
-    fi
-    fi
+  ###############################################
+  # STEP 7: Cachegrind optimized
+  ###############################################
+  echo "[7] Running Cachegrind optimized version…"
+  valgrind --tool=cachegrind \
+    --cache-sim=yes --branch-sim=no \
+    --cachegrind-out-file="$CG_RAW_OPT" \
+    "./$BIN_OPT" "${PROG_ARGS[@]}"
 
-    if [ -f $PROF_DATA ]; then
-    BITCODE=$BITCODE_DIR/$BENCH.profdata.bc
-    else
-    BITCODE=$BITCODE_DIR/$BENCH.bc
-    fi
+  ###############################################
+  # STEP 8: Annotate optimized output
+  ###############################################
+  echo "[8] Running cg_annotate on optimized output…"
+  cg_annotate --auto=yes --show-percs=no "$CG_RAW_OPT" > "$CG_ANN_OPT"
 
-    # Generate .dot files in tmp dir
-    opt $PROF_FLAGS -passes="dot-$VIZ_TYPE" $BITCODE > /dev/null
+  ###############################################
+  # SUMMARY FOR THIS BENCHMARK
+  ###############################################
+  echo "[Summary] Cache stats for $SRC_FILE"
 
-    # Combine .dot files into PDF
-    if [ $VIZ_TYPE = "cfg" ]; then
-    DOT_FILES=$(ls .*.dot)
-    else
-    DOT_FILES=$(ls *.dot)
-    fi
-    cat $DOT_FILES | dot -Tpdf > $OUTPUT_DIR/$BENCH.$VIZ_TYPE.pdf
-    echo "Created $BENCH.$VIZ_TYPE.pdf"
-    cd - > /dev/null
-    rm -rf $TMP_DIR
+  print_program_totals_line() {
+      local line="$1"
+      read -r ir i1mr ilmr dr d1mr dlmr dw d1mw dlmw _ <<< "$line"
+      printf "%-12s %-8s %-8s %-12s %-8s %-8s %-12s %-8s %-8s\n" \
+          "Ir" "I1mr" "ILmr" "Dr" "D1mr" "DLmr" "Dw" "D1mw" "DLmw"
+      printf "%-12s %-8s %-8s %-12s %-8s %-8s %-12s %-8s %-8s\n" \
+          "$ir" "$i1mr" "$ilmr" "$dr" "$d1mr" "$dlmr" "$dw" "$d1mw" "$dlmw"
+  }
 
+  # echo -e "\n  --- BASELINE ---"
+  # local totals_line
+  # totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN" | tail -n1)
+  # print_program_totals_line "$totals_line"
+
+  # echo -e "\n  --- OPTIMIZED ---"
+  # totals_line=$(grep "PROGRAM TOTALS" -A1 "$CG_ANN_OPT" | tail -n1)
+  # print_program_totals_line "$totals_line"
+  echo -e "\n  --- BASELINE ---"
+  local totals_line
+  totals_line=$(grep "PROGRAM TOTALS" "$CG_ANN")
+  print_program_totals_line "$totals_line"
+
+  echo -e "\n  --- OPTIMIZED ---"
+  totals_line=$(grep "PROGRAM TOTALS" "$CG_ANN_OPT")
+  print_program_totals_line "$totals_line"
+
+
+  # Percentage change in runtime
+  local PERC
+  PERC=$(echo "100.0 * ($OPT_AVG - $BASE_AVG) / $BASE_AVG" | bc -l)
+  echo
+  echo "  Runtime change for $SRC_FILE: ${PERC}%  (positive = slower, negative = speedup)"
+
+  # Export per-benchmark numbers back to caller via globals
+  LAST_BASE_AVG="$BASE_AVG"
+  LAST_OPT_AVG="$OPT_AVG"
+  LAST_PERC="$PERC"
+  LAST_FILE="$SRC_FILE"
+
+  # Cleanup per-benchmark intermediates if requested
+  if $CLEAN; then
+    rm -f "$IR_ORIG" "$IR_OPT" "$BIN_ORIG" "$BIN_OPT" \
+          "$CG_RAW" "$CG_ANN" "$CG_RAW_OPT" "$CG_ANN_OPT"
+  fi
 }
 
-if $generate_viz; then
-    generate_cfg_viz $FILENAME              # Generate CFG visualization without FPLICM
-    generate_cfg_viz $FILENAME.fplicm       # Generate CFG visualization after FPLICM
+###############################################
+# MAIN: single file vs directory mode
+###############################################
+TOTAL_PERC="0.0"
+BENCH_COUNT=0
+
+BEST_FILE=""
+BEST_BASE=""
+BEST_OPT=""
+BEST_PERC=""
+
+WORST_FILE=""
+WORST_BASE=""
+WORST_OPT=""
+WORST_PERC=""
+
+if [ -d "$TARGET" ]; then
+  # Directory mode: run all *.c files
+  DIR="$TARGET"
+  echo "Running all *.c benchmarks in directory: $DIR"
+
+  shopt -s nullglob
+  files=("$DIR"/*.c)
+  shopt -u nullglob
+
+  if [ ${#files[@]} -eq 0 ]; then
+    echo "No .c files found in $DIR"
+    exit 1
+  fi
+
+  for f in "${files[@]}"; do
+    run_one_benchmark "$f"
+    TOTAL_PERC=$(echo "$TOTAL_PERC + $LAST_PERC" | bc -l)
+    BENCH_COUNT=$((BENCH_COUNT + 1))
+
+    # Initialize best/worst on the first benchmark
+    if [ -z "$BEST_FILE" ]; then
+      BEST_FILE="$LAST_FILE"
+      BEST_BASE="$LAST_BASE_AVG"
+      BEST_OPT="$LAST_OPT_AVG"
+      BEST_PERC="$LAST_PERC"
+
+      WORST_FILE="$LAST_FILE"
+      WORST_BASE="$LAST_BASE_AVG"
+      WORST_OPT="$LAST_OPT_AVG"
+      WORST_PERC="$LAST_PERC"
+    else
+      # Compare for best (most negative) speedup
+      if [ "$(echo "$LAST_PERC < $BEST_PERC" | bc -l)" -eq 1 ]; then
+        BEST_FILE="$LAST_FILE"
+        BEST_BASE="$LAST_BASE_AVG"
+        BEST_OPT="$LAST_OPT_AVG"
+        BEST_PERC="$LAST_PERC"
+      fi
+
+      # Compare for worst (largest positive slowdown)
+      if [ "$(echo "$LAST_PERC > $WORST_PERC" | bc -l)" -eq 1 ]; then
+        WORST_FILE="$LAST_FILE"
+        WORST_BASE="$LAST_BASE_AVG"
+        WORST_OPT="$LAST_OPT_AVG"
+        WORST_PERC="$LAST_PERC"
+      fi
+    fi
+  done
+
+  if [ "$BENCH_COUNT" -gt 0 ]; then
+    AVG_PERC=$(echo "scale=6; $TOTAL_PERC / $BENCH_COUNT" | bc -l)
+    echo
+    echo "====================================================="
+    echo "Average % runtime change over $BENCH_COUNT benchmarks:"
+    echo "  ${AVG_PERC}%  (positive = slowdown, negative = speedup)"
+    echo "====================================================="
+
+    echo
+    echo "Best file (most negative % = biggest speedup):"
+    echo "  File:      $BEST_FILE"
+    echo "  Base avg:  ${BEST_BASE} s"
+    echo "  Opt avg:   ${BEST_OPT} s"
+    echo "  % change:  ${BEST_PERC}%"
+
+    echo
+    echo "Worst file (most positive % = biggest slowdown):"
+    echo "  File:      $WORST_FILE"
+    echo "  Base avg:  ${WORST_BASE} s"
+    echo "  Opt avg:   ${WORST_OPT} s"
+    echo "  % change:  ${WORST_PERC}%"
+    echo "====================================================="
+  fi
+
+else
+  # Single-file mode
+  run_one_benchmark "$TARGET"
+  echo
+  echo "Single benchmark % runtime change: ${LAST_PERC}%"
 fi
 
-# Cleanup: Remove this if you want to retain the created files.
-rm -f default.profraw *_prof *_fplicm *.bc *.profdata *_output *.ll
-
-cd $CURRENT_DIR
+echo -e "\nDone ✔"

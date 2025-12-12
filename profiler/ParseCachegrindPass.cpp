@@ -134,7 +134,7 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
     // Only prefetch loads
     Addr = LI->getPointerOperand();
   } else if (auto *SI = dyn_cast<StoreInst>(I)) {
-    // Skip stores entirely for now
+    // Skip stores entirely
     return false;
   } else {
     return false; // not a load/store
@@ -288,7 +288,6 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
       return PreservedAnalyses::all();
     }
 
-    // Optional: debug dump of parsed metrics
     errs() << "===== Parsed Cachegrind Line Metrics =====\n";
     for (const auto &entry : lineMetrics) {
       const auto &file = entry.first.first;
@@ -335,11 +334,11 @@ struct ParseCachegrindPass : public PassInfoMixin<ParseCachegrindPass> {
           if (!isHotLine(fl))
             continue;
 
-          errs() << "Inserting prefetch for hot line "
+          if (insertPrefetch(&I)) {
+            errs() << "Inserting prefetch for hot line "
                  << FileName << ":" << Line << "\n";
-
-          if (insertPrefetch(&I))
             Changed = true;
+          }
         }
       }
     }
